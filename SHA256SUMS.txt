@@ -1,0 +1,2 @@
+557b6d6ac6a22435a4ea3bb02a03a9e3c0e0e35564b98fbd95bcf39f859d3b66  ZapretUI.exe
+3c53f2fdbeabc424ffac0b068d6b5c6929742e5bcfc33903b9088f94f9b0b305  ZapretUI-source.zip
