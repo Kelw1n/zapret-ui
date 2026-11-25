@@ -4,7 +4,7 @@
 
 <p align="center">
   <a href="https://github.com/Kelw1n/zapret-ui/releases/latest/download/ZapretUI.exe"><img alt="Скачать ZapretUI.exe" src="https://img.shields.io/badge/Download-ZapretUI.exe-ff6824?style=for-the-badge"></a>
-  <a href="https://github.com/Kelw1n/zapret-ui/releases"><img alt="Релизы" src="https://img.shields.io/github/v/release/Kelw1n/zapret-ui?style=for-the-badge&color=292929"></a>
+  <a href="https://github.com/Kelw1n/zapret-ui/releases"><img alt="Релизы" src="https://img.shields.io/github/v/release/Kelw1n/zapret-ui?style=for-the-badge&amp;color=292929&amp;label=release&amp;cacheSeconds=300"></a>
 </p>
 
 # Zapret UI
