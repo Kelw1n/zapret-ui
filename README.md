@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Kelw1n/zapret-ui/releases/latest/download/ZapretUI.exe"><img alt="Скачать ZapretUI.exe" src="https://img.shields.io/badge/Download-ZapretUI.exe-ff6824?style=for-the-badge"></a>
+  <a href="https://github.com/Kelw1n/zapret-ui/releases/latest"><img alt="Скачать ZapretUI.exe" src="https://img.shields.io/badge/Download-ZapretUI.exe-ff6824?style=for-the-badge"></a>
   <a href="https://github.com/Kelw1n/zapret-ui/releases"><img alt="Релизы" src="https://img.shields.io/github/v/release/Kelw1n/zapret-ui?style=for-the-badge&amp;color=292929&amp;label=release&amp;cacheSeconds=300"></a>
 </p>
 
@@ -24,7 +24,7 @@
 | Раздел | Что можно сделать |
 | --- | --- |
 | **Zapret** | Выбрать стратегию Flowseal и запустить или остановить её в фоне. |
-| **SoundCloud** | Стратегии Flowseal автоматически подключают отдельные списки доменов SoundCloud и четыре выделенных IP из описания настройки. Они подхватываются при каждом запуске стратегии, включая запуск после обновления ядра. |
+| **SoundCloud** | Стратегии Flowseal автоматически подключают отдельные списки доменов SoundCloud и четыре точечных IP-адреса. Они подхватываются при каждом запуске стратегии, включая запуск после обновления ядра. |
 | **TG WS Proxy** | Запустить локальный MTProto-прокси на `127.0.0.1`, выбрать порт и скопировать ссылку для Telegram Desktop. Порт по умолчанию `1443`. |
 | **Обновления** | Проверить стабильный релиз в официальном репозитории Flowseal, обновить ядро или вернуться к предыдущей установленной версии. Перед установкой архив сверяется по размеру и SHA‑256. Пользовательские списки и Game Filter сохраняются. |
 | **Автозапуск и трей** | Открывать интерфейс в трее при входе в Windows и восстанавливать включённые компоненты. Активные процессы продолжают работать при закрытии окна. Остановить их можно кнопками в окне или через меню трея. |
