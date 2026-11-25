@@ -186,7 +186,7 @@ pub fn toggle() -> Result<State, String> {
         .map_err(|error| error.to_string())
 }
 
-fn protected_executable() -> io::Result<PathBuf> {
+fn protected_root() -> io::Result<PathBuf> {
     unsafe {
         let mut folder = null_mut();
         let result = SHGetKnownFolderPath(&FOLDERID_ProgramFiles, 0, null_mut(), &mut folder);
@@ -198,12 +198,20 @@ fn protected_executable() -> io::Result<PathBuf> {
         }
         let directory = PathBuf::from(std::ffi::OsString::from_wide(wide_slice(folder)));
         CoTaskMemFree(folder.cast());
-        Ok(directory.join("ZapretUI-Autostart").join(concat!(
-            "ZapretUI-",
-            env!("CARGO_PKG_VERSION"),
-            ".exe"
-        )))
+        Ok(directory.join("ZapretUI-Autostart"))
     }
+}
+
+pub fn runtime_root() -> io::Result<PathBuf> {
+    let root = protected_root()?;
+    protect_directory(&root)?;
+    let runtime = root.join(format!("runtime-{}", current_user_sid()?));
+    protect_directory(&runtime)?;
+    Ok(runtime)
+}
+
+fn protected_executable() -> io::Result<PathBuf> {
+    Ok(protected_root()?.join(concat!("ZapretUI-", env!("CARGO_PKG_VERSION"), ".exe")))
 }
 
 fn install_copy(destination: &Path) -> io::Result<()> {

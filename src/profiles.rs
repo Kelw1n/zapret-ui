@@ -125,6 +125,8 @@ pub fn launch_args(folder: &Path, filename: &str) -> Result<String, String> {
         return Err(unsupported());
     }
 
+    let source = with_soundcloud_lists(&folder.join("lists"), source)?;
+
     let flag = folder.join("utils").join("game_filter.enabled");
     let (tcp, udp) = match fs::read_to_string(flag) {
         Ok(mode) => match mode
@@ -183,4 +185,34 @@ pub fn launch_args(folder: &Path, filename: &str) -> Result<String, String> {
         }
     }
     Ok(args)
+}
+
+fn with_soundcloud_lists(lists: &Path, mut command: String) -> Result<String, String> {
+    // Keep Flowseal and user lists intact. Attach the supplement to the same
+    // strategy blocks as the corresponding upstream include list.
+    for (upstream, supplement, filename, content) in [
+        (
+            r#"--hostlist="%LISTS%list-general.txt""#,
+            r#"--hostlist="%LISTS%soundcloud-hosts.txt""#,
+            "soundcloud-hosts.txt",
+            include_bytes!("../assets/soundcloud/hosts.txt").as_slice(),
+        ),
+        (
+            r#"--ipset="%LISTS%ipset-all.txt""#,
+            r#"--ipset="%LISTS%soundcloud-ipset.txt""#,
+            "soundcloud-ipset.txt",
+            include_bytes!("../assets/soundcloud/ipset.txt").as_slice(),
+        ),
+    ] {
+        if command.contains(upstream) {
+            let path = lists.join(filename);
+            if fs::read(&path).as_deref().ok() != Some(content) {
+                fs::write(path, content).map_err(|err| {
+                    format!("Не удалось записать список SoundCloud {filename}. {err}")
+                })?;
+            }
+            command = command.replace(upstream, &format!("{upstream} {supplement}"));
+        }
+    }
+    Ok(command)
 }

@@ -36,7 +36,7 @@ use windows_sys::Win32::{
 use crate::{
     process::{self, Session},
     profiles::{self, Profile},
-    runtime::{self, Installed, Release},
+    runtime::{self, Installed, Release, Resume},
     startup::{self, State as StartupState},
     telegram::{self, Proxy},
     wide,
@@ -52,6 +52,7 @@ const INSTALL_UPDATE: u16 = 111;
 const AUTHOR: u16 = 112;
 const ROLLBACK: u16 = 113;
 const AUTOSTART: u16 = 114;
+const RESUME_COMPONENTS: u16 = 115;
 const APP_ICON: u16 = 101;
 const SELECT: u16 = 104;
 const PROXY_TOGGLE: u16 = 105;
@@ -134,6 +135,7 @@ struct Ui {
     selected: usize,
     active: Option<Active>,
     proxy: Option<ActiveProxy>,
+    resume: Resume,
     tray: bool,
     taskbar_created: u32,
 }
@@ -254,6 +256,7 @@ impl Ui {
             "Закрыть окно = свернуть активные процессы в трей.",
             (24, 472, 720, 24),
         );
+        let resume = Resume::load();
         let ui = Self {
             window,
             core_tab: layout.button("ZAPRET", (15, 70, 113, 33), TAB_CORE),
@@ -269,7 +272,7 @@ impl Ui {
             port_label: layout.label("ПОРТ", (15, 125, 54, 23)),
             port: layout.control(
                 "EDIT",
-                &telegram::PORT.to_string(),
+                &resume.proxy_port.unwrap_or(telegram::PORT).to_string(),
                 (75, 120, 82, 28),
                 WS_TABSTOP | WS_BORDER | ES_CENTER as u32 | ES_NUMBER as u32,
                 PORT_EDIT,
@@ -294,6 +297,7 @@ impl Ui {
             selected: 0,
             active: None,
             proxy: None,
+            resume,
             tray: false,
             taskbar_created: unsafe { RegisterWindowMessageW(wide("TaskbarCreated").as_ptr()) },
         };
@@ -684,13 +688,18 @@ impl Ui {
             self.proxy_button,
             if self.proxy.is_some() {
                 "ОСТАНОВИТЬ ПРОКСИ"
+            } else if self.resume.proxy_port.is_some() {
+                "СБРОСИТЬ ЗАПУСК"
             } else {
                 "ЗАПУСТИТЬ ПРОКСИ"
             },
         );
         unsafe {
             EnableWindow(self.start, can_start as i32);
-            EnableWindow(self.stop, (active.is_some() && !stopping) as i32);
+            EnableWindow(
+                self.stop,
+                (!stopping && (active.is_some() || self.resume.strategy.is_some())) as i32,
+            );
             EnableWindow(self.select, (!self.profiles.is_empty() && !stopping) as i32);
             EnableWindow(self.check_update, !busy as i32);
             EnableWindow(
@@ -827,30 +836,123 @@ impl Ui {
         Ok(())
     }
 
+    fn launch_proxy(&mut self, port: u16) -> Result<(), String> {
+        self.ensure_timer()?;
+        let worker = Proxy::start(port)?;
+        self.proxy = Some(ActiveProxy {
+            worker,
+            starting: Some(Instant::now()),
+            stopping: false,
+        });
+        set_text(self.proxy_status, "Запуск TG WS Proxy...");
+        self.buttons();
+        Ok(())
+    }
+
+    fn save_resume(&mut self, next: Resume) -> Result<(), String> {
+        next.save()
+            .map_err(|error| format!("Не удалось сохранить запуск. {error}"))?;
+        self.resume = next;
+        self.buttons();
+        Ok(())
+    }
+
+    fn resume_components(&mut self) {
+        if let Some(filename) = &self.resume.strategy {
+            let result = self
+                .profiles
+                .iter()
+                .position(|profile| profile.filename.eq_ignore_ascii_case(filename))
+                .or_else(|| (!self.profiles.is_empty()).then_some(self.selected))
+                .ok_or_else(|| "Нет доступных стратегий.".to_owned());
+            match result {
+                Ok(index) if self.active.is_none() => {
+                    self.selected = index;
+                    if let Err(error) = self.launch(index) {
+                        set_text(
+                            self.status,
+                            format!("Не удалось восстановить Zapret. {error}"),
+                        );
+                    }
+                }
+                Err(error) => set_text(
+                    self.status,
+                    format!("Не удалось восстановить Zapret. {error}"),
+                ),
+                _ => {}
+            }
+        }
+        if let Some(port) = self.resume.proxy_port.filter(|&port| port > 0) {
+            if self.proxy.is_none() {
+                if let Err(error) = self.launch_proxy(port) {
+                    set_text(
+                        self.proxy_status,
+                        format!("Не удалось восстановить TG WS Proxy. {error}"),
+                    );
+                }
+            }
+        }
+        self.buttons();
+    }
+
+    fn start_or_switch(&mut self) -> Result<(), String> {
+        let next = self.selected;
+        match self.active.as_ref() {
+            None => self.launch(next)?,
+            Some(active) if active.stopping.is_none() && active.index != next => {
+                self.stop(Some(next))?
+            }
+            Some(_) => return Ok(()),
+        }
+        self.save_resume(Resume {
+            strategy: Some(self.profiles[next].filename.clone()),
+            ..self.resume.clone()
+        })
+    }
+
+    fn stop_zapret(&mut self) -> Result<(), String> {
+        self.stop(None)?;
+        self.save_resume(Resume {
+            strategy: None,
+            ..self.resume.clone()
+        })?;
+        if self.active.is_none() && !self.profiles.is_empty() {
+            set_text(self.status, "Остановлен");
+        }
+        Ok(())
+    }
+
     fn toggle_proxy(&mut self) -> Result<(), String> {
         if let Some(proxy) = &mut self.proxy {
-            if !proxy.stopping {
-                proxy.worker.session.stop().map_err(|err| err.to_string())?;
-                proxy.stopping = true;
-                set_text(self.proxy_status, "Остановка...");
+            if proxy.stopping {
+                return Ok(());
             }
+            proxy.worker.session.stop().map_err(|err| err.to_string())?;
+            proxy.stopping = true;
+            set_text(self.proxy_status, "Остановка...");
+            self.buttons();
+        }
+        let port = if self.proxy.is_some() || self.resume.proxy_port.is_some() {
+            if self.proxy.is_none() {
+                set_text(
+                    self.proxy_status,
+                    "Остановлен. Адрес подключения: 127.0.0.1.",
+                );
+            }
+            None
         } else {
             let port = window_text(self.port)
                 .parse::<u16>()
                 .ok()
                 .filter(|&port| port > 0)
                 .ok_or("Введи порт от 1 до 65535.")?;
-            self.ensure_timer()?;
-            let worker = Proxy::start(port)?;
-            self.proxy = Some(ActiveProxy {
-                worker,
-                starting: Some(Instant::now()),
-                stopping: false,
-            });
-            set_text(self.proxy_status, "Запуск TG WS Proxy...");
-        }
-        self.buttons();
-        Ok(())
+            self.launch_proxy(port)?;
+            Some(port)
+        };
+        self.save_resume(Resume {
+            proxy_port: port,
+            ..self.resume.clone()
+        })
     }
 
     fn tick(&mut self) {
@@ -965,12 +1067,14 @@ impl Ui {
                 self.select_profile();
                 Ok(())
             }
-            START if self.selected < self.profiles.len() => match self.active.as_ref() {
-                None => self.launch(self.selected),
-                Some(active) if active.index != self.selected => self.stop(Some(self.selected)),
-                Some(_) => Ok(()),
-            },
-            STOP => self.stop(None),
+            RESUME_COMPONENTS => {
+                self.resume_components();
+                Ok(())
+            }
+            START if self.selected < self.profiles.len() && self.pending_update.is_none() => {
+                self.start_or_switch()
+            }
+            STOP => self.stop_zapret(),
             PROXY_TOGGLE => self.toggle_proxy(),
             PROXY_COPY => {
                 if let Some(proxy) = &self.proxy {
@@ -1420,6 +1524,7 @@ unsafe fn message_loop(instance: HINSTANCE, class: &[u16], start_in_tray: bool) 
             SetFocus(initial_focus);
         }
     }
+    PostMessageW(window, WM_COMMAND, RESUME_COMPONENTS as usize, 0);
     PostMessageW(window, WM_COMMAND, CHECK_UPDATE as usize, 0);
 
     let mut msg: MSG = zeroed();

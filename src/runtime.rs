@@ -6,7 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use windows_sys::Win32::{
     Networking::WinHttp::*,
@@ -14,7 +14,7 @@ use windows_sys::Win32::{
 };
 use zip::ZipArchive;
 
-use crate::{profiles, wide};
+use crate::{profiles, startup, wide};
 
 const BUNDLED: Version = Version(1, 10, 4);
 const CORE: &[u8] = include_bytes!("../assets/runtime/zapret-1.10.4.zip");
@@ -93,7 +93,9 @@ pub fn data_root() -> Result<PathBuf, String> {
 }
 
 fn core_root() -> Result<PathBuf, String> {
-    Ok(data_root()?.join("runtime").join("zapret"))
+    Ok(startup::runtime_root()
+        .map_err(|error| error.to_string())?
+        .join("zapret"))
 }
 
 fn read_installed(root: &Path, version: Version) -> Option<Installed> {
@@ -102,59 +104,84 @@ fn read_installed(root: &Path, version: Version) -> Option<Installed> {
         .then_some(Installed { version, folder })
 }
 
+fn installed_pair(root: &Path, record: &str) -> (Option<Installed>, Option<Installed>) {
+    let mut lines = record
+        .lines()
+        .map(|line| Version::parse(line).and_then(|v| read_installed(root, v)));
+    (lines.next().flatten(), lines.next().flatten())
+}
+
 pub fn prepare_core(previous: &Path) -> Result<CoreState, String> {
     let root = core_root()?;
     fs::create_dir_all(&root).map_err(|err| err.to_string())?;
     match fs::read_to_string(root.join("active.txt")) {
-        Ok(record) => {
-            let mut lines = record.lines();
-            let active = lines
-                .next()
-                .and_then(Version::parse)
-                .and_then(|v| read_installed(&root, v));
-            let prior = lines
-                .next()
-                .and_then(Version::parse)
-                .and_then(|v| read_installed(&root, v));
-            if let Some(active) = active {
-                return Ok(CoreState {
-                    active,
-                    previous: prior,
-                });
-            }
-            if let Some(active) = prior {
+        Ok(record) => match installed_pair(&root, &record) {
+            (Some(active), previous) => return Ok(CoreState { active, previous }),
+            (None, Some(active)) => {
                 save_state(&root, &active, None)?;
                 return Ok(CoreState {
                     active,
                     previous: None,
                 });
             }
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            // Version 0.3 used the newest complete directory as an implicit pointer.
-            let mut legacy: Vec<_> = fs::read_dir(&root)
-                .map_err(|err| err.to_string())?
-                .flatten()
-                .filter_map(|entry| Version::parse(entry.file_name().to_str()?))
-                .filter_map(|version| read_installed(&root, version))
-                .collect();
-            legacy.sort_by_key(|item| item.version);
-            if let Some(active) = legacy.pop() {
-                let previous = legacy.pop();
-                save_state(&root, &active, previous.as_ref())?;
-                return Ok(CoreState { active, previous });
-            }
-        }
+            (None, None) => {}
+        },
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.to_string()),
     }
-    verify_archive(&bundled_release(), CORE)?;
-    let active = install_core(&root, BUNDLED, CORE)?;
-    carry_settings(previous, &active.folder)?;
-    save_state(&root, &active, None)?;
+    // Old runtimes live in AppData. Reinstall from verified archives before
+    // allowing the elevated logon process to execute any component.
+    let legacy = data_root()?.join("runtime").join("zapret");
+    let (old, prior) = match fs::read_to_string(legacy.join("active.txt")) {
+        Ok(record) => installed_pair(&legacy, &record),
+        Err(_) => (
+            previous
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(Version::parse)
+                .and_then(|version| read_installed(&legacy, version)),
+            None,
+        ),
+    };
+    let active = match old
+        .as_ref()
+        .and_then(|item| reinstall(&root, item.version).ok())
+    {
+        Some(active) => active,
+        None => reinstall(&root, BUNDLED)?,
+    };
+    let previous_core = prior
+        .filter(|item| item.version != active.version)
+        .and_then(|item| reinstall(&root, item.version).ok());
+    carry_settings(
+        old.as_ref().map_or(previous, |item| &item.folder),
+        &active.folder,
+    )?;
+    save_state(&root, &active, previous_core.as_ref())?;
     Ok(CoreState {
         active,
-        previous: None,
+        previous: previous_core,
     })
+}
+
+fn reinstall(root: &Path, version: Version) -> Result<Installed, String> {
+    if let Some(installed) = read_installed(root, version) {
+        return Ok(installed);
+    }
+    if version == BUNDLED {
+        verify_archive(&bundled_release(), CORE)?;
+        return install_core(root, version, CORE);
+    }
+    let metadata = download(
+        "api.github.com",
+        &format!("/repos{ORIGIN}/tags/{version}"),
+        512 * 1024,
+    )?;
+    let release = parse_release(&metadata)?;
+    if release.version != version {
+        return Err("Получена другая версия Zapret.".into());
+    }
+    update(&release)
 }
 
 pub fn activate(next: &Installed, current: Option<&Installed>) -> Result<(), String> {
@@ -196,27 +223,55 @@ fn save_state(root: &Path, active: &Installed, previous: Option<&Installed>) -> 
         active.version,
         previous.map_or(String::new(), |item| item.version.to_string())
     );
-    let path = root.join("active.txt");
-    let staging = root.join("active.tmp");
-    let file = fs::File::create(&staging).map_err(|err| err.to_string())?;
+    write_atomic(&root.join("active.txt"), record.as_bytes())
+}
+
+fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
     use std::io::Write;
-    (&file)
-        .write_all(record.as_bytes())
-        .and_then(|()| file.sync_all())
-        .map_err(|err| err.to_string())?;
+    let staging = path.with_extension(format!("tmp-{}", std::process::id()));
+    let mut file = fs::File::create_new(&staging).map_err(|err| err.to_string())?;
+    let written = file.write_all(bytes).and_then(|()| file.sync_all());
     drop(file);
-    check(unsafe {
-        MoveFileExW(
-            wide(staging.as_os_str()).as_ptr(),
-            wide(path.as_os_str()).as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    })
+    let result = written.map_err(|err| err.to_string()).and_then(|()| {
+        check(unsafe {
+            MoveFileExW(
+                wide(staging.as_os_str()).as_ptr(),
+                wide(path.as_os_str()).as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        })
+    });
+    if result.is_err() {
+        let _ = fs::remove_file(&staging);
+    }
+    result
+}
+
+#[derive(Clone, Default, Deserialize, Serialize)]
+pub struct Resume {
+    pub strategy: Option<String>,
+    pub proxy_port: Option<u16>,
+}
+
+impl Resume {
+    pub fn load() -> Self {
+        data_root()
+            .ok()
+            .and_then(|root| fs::read(root.join("resume.json")).ok())
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn save(&self) -> Result<(), String> {
+        let root = data_root()?;
+        fs::create_dir_all(&root).map_err(|error| error.to_string())?;
+        let bytes = serde_json::to_vec(self).map_err(|error| error.to_string())?;
+        write_atomic(&root.join("resume.json"), &bytes)
+    }
 }
 
 pub fn prepare_proxy() -> Result<PathBuf, String> {
-    let runtime = data_root()?.join("runtime");
-    fs::create_dir_all(&runtime).map_err(|err| err.to_string())?;
+    let runtime = startup::runtime_root().map_err(|err| err.to_string())?;
     let destination = runtime.join("telegram-1.11.2");
     install_folder(&destination, PROXY, None, |stage| {
         if !stage.join("python.exe").is_file() || !stage.join("proxy/tg_ws_proxy.py").is_file() {
